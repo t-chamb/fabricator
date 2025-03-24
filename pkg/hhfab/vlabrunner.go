@@ -314,7 +314,7 @@ func (c *Config) VLABRun(ctx context.Context, vlab *VLAB, opts VLABRunOpts) erro
 					return fmt.Errorf("writing ignition: %w", err)
 				}
 			} else if vm.Type == VMTypeExternal {
-				but, ign, err := externalIgnition(c.Fab, vm, vlab.ExternalVRFs)
+				but, ign, err := externalIgnition(c.Fab, vm, vlab.Externals)
 				if err != nil {
 					return fmt.Errorf("generating external ignition: %w", err)
 				}
@@ -682,12 +682,13 @@ func execHelper(ctx context.Context, baseDir string, args []string) error {
 	return nil
 }
 
-func externalIgnition(fab fabapi.Fabricator, vm VM, extVRFMap map[string]ExternalVRFCfg) (string, []byte, error) {
+func externalIgnition(fab fabapi.Fabricator, vm VM, ext ExternalsCfg) (string, []byte, error) {
 	but, err := tmplutil.FromTemplate("butane", frrButaneTmpl, map[string]any{
 		"Hostname":       vm.Name,
 		"PasswordHash":   fab.Spec.Config.Control.DefaultUser.PasswordHash,
 		"AuthorizedKeys": fab.Spec.Config.Control.DefaultUser.AuthorizedKeys,
-		"ExternalVRFs":   extVRFMap,
+		"ExternalVRFs":   ext.VRFs,
+		"ExternalNICs":   ext.NICs,
 	})
 	if err != nil {
 		return "", nil, fmt.Errorf("butane: %w", err)

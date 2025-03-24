@@ -40,29 +40,62 @@ storage:
         - inline: |
             127.0.0.1 {{ .Hostname }}
 
-    {{range $vrfkey, $vrf := .ExternalVRFs}}
-    - path: /etc/systemd/network/10-{{$vrfkey}}.netdev
+    # Declare VLANs first
+    {{range $connNicKey, $connNic := .ExternalNICs}}{{range $attach := $connNic.Attachments}}
+    - path: /etc/systemd/network/10-{{$connNicKey}}.{{$attach.Vlan}}.netdev
       mode: 0644
       contents:
         inline: |
           [NetDev]
-          Name={{$vrfkey}}
+          Name={{$connNicKey}}.{{$attach.Vlan}}
+          Kind=vlan
+
+          [VLAN]
+          Id={{$attach.Vlan}}
+    {{end}}{{end}}
+
+    # Declare VRFs, one per external
+    {{range $vrfKey, $vrf := .ExternalVRFs}}
+    - path: /etc/systemd/network/10-{{$vrfKey}}.netdev
+      mode: 0644
+      contents:
+        inline: |
+          [NetDev]
+          Name={{$vrfKey}}
           Kind=vrf
 
           [VRF]
           Table={{$vrf.TableID}}
+    {{end}}
 
-    {{range $nickey, $nic := $vrf.NICs}}
-    - path: /etc/systemd/network/20-{{$nickey}}.network
+    # Declare NICs and their VLAN subinterfaces. if Untagged, also add relevant config
+    {{range $connNicKey, $connNic := .ExternalNICs}}
+    - path: /etc/systemd/network/20-{{$connNicKey}}.network
       mode: 0644
       contents:
         inline: |
           [Match]
-          Name={{$nickey}}
+          Name={{$connNicKey}}
+
+          [Network]{{range $attach := $connNic.Attachments}}
+          VLAN={{$connNicKey}}.{{$attach.Vlan}}{{end}}
+          {{if $connNic.Untagged}}
+          VRF={{$connNic.UntaggedCfg.VRF}}
+          Address={{$connNic.UntaggedCfg.Prefix}}
+          {{end}}
+
+    {{range $attach := $connNic.Attachments}}
+    - path: /etc/systemd/network/30-{{$connNicKey}}.{{$attach.Vlan}}.network
+      mode: 0644
+      contents:
+        inline: |
+          [Match]
+          Name={{$connNicKey}}.{{$attach.Vlan}}
+          Type=vlan
 
           [Network]
-          VRF={{$vrfkey}}
-          Address={{$nic.Prefix}}
+          VRF={{$attach.VRF}}
+          Address={{$attach.Prefix}}
     {{end}}{{end}}
     - path: /etc/systemd/network/30-enp2s0.network
       mode: 0644
@@ -109,15 +142,24 @@ storage:
           router bgp {{$vrf.ASN}} vrf {{$vrfkey}}
            bgp log-neighbor-changes
            no bgp ebgp-requires-policy
-           no bgp network import-check {{range $nickey, $nic := $vrf.NICs}}
-           neighbor {{$nic.NeighborIP}} remote-as {{$nic.NeighborAS}}
-           neighbor {{$nic.NeighborIP}} advertisement-interval 0
-           neighbor {{$nic.NeighborIP}} timers connect 30 {{end}}
-           address-family ipv4 unicast {{range $key, $nic := .NICs}}
-            neighbor {{$nic.NeighborIP}} activate
-            no neighbor {{$nic.NeighborIP}} send-community large
-            neighbor {{$nic.NeighborIP}} route-map {{$vrfkey}}In in
-            neighbor {{$nic.NeighborIP}} route-map {{$vrfkey}}Out out {{end}}
+           no bgp network import-check
+           {{range $connNicKey, $connNic := $.ExternalNICs}}{{range $attach := $connNic.Attachments}}{{if eq $attach.VRF $vrfkey}}
+           neighbor {{$attach.NeighborIP}} remote-as {{$attach.NeighborAS}}
+           neighbor {{$attach.NeighborIP}} advertisement-interval 0
+           neighbor {{$attach.NeighborIP}} timers connect 30 {{end}}{{end}}{{if and ($connNic.Untagged) (eq $connNic.UntaggedCfg.VRF $vrfkey)}}
+           neighbor {{$connNic.UntaggedCfg.NeighborIP}} remote-as {{$connNic.UntaggedCfg.NeighborAS}}
+           neighbor {{$connNic.UntaggedCfg.NeighborIP}} advertisement-interval 0
+           neighbor {{$connNic.UntaggedCfg.NeighborIP}} timers connect 30{{end}}
+
+           address-family ipv4 unicast {{range $attach := $connNic.Attachments}}{{if eq $attach.VRF $vrfkey}}
+            neighbor {{$attach.NeighborIP}} activate
+            no neighbor {{$attach.NeighborIP}} send-community large
+            neighbor {{$attach.NeighborIP}} route-map {{$vrfkey}}In in
+            neighbor {{$attach.NeighborIP}} route-map {{$vrfkey}}Out out {{end}}{{end}}{{if and ($connNic.Untagged) (eq $connNic.UntaggedCfg.VRF $vrfkey)}}
+            neighbor {{$connNic.UntaggedCfg.NeighborIP}} activate
+            no neighbor {{$connNic.UntaggedCfg.NeighborIP}} send-community large
+            neighbor {{$connNic.UntaggedCfg.NeighborIP}} route-map {{$vrfkey}}In in
+            neighbor {{$connNic.UntaggedCfg.NeighborIP}} route-map {{$vrfkey}}Out out{{end}}
             maximum-paths 1
             maximum-paths ibgp 1
             redistribute static
@@ -127,7 +169,7 @@ storage:
             maximum-paths 1
             maximum-paths ibgp 1
            !
-          !{{end}}
+          !{{end}}{{end}}
           router bgp 1
            address-family ipv4 unicast
             redistribute static{{range $vrfkey, $vrf := .ExternalVRFs}}
@@ -214,9 +256,9 @@ systemd:
 
         [Service]
         Type=simple
-        ExecStartPre=/usr/bin/mkdir -p /etc/frr /var/run/frr
-        ExecStartPre=/usr/bin/chown -R 100:100 /etc/frr /var/run/frr
-        ExecStart=/usr/bin/docker run --name=frr --rm --network=host --privileged -v /etc/frr:/etc/frr:rw -v /var/run/frr:/var/run/frr:rw quay.io/frrouting/frr:10.2.1
+        ExecStartPre=/usr/bin/mkdir -p /etc/frr /var/run/frr /var/tmp/frr
+        ExecStartPre=/usr/bin/chown -R 100:100 /etc/frr /var/run/frr /var/tmp/frr
+        ExecStart=/usr/bin/docker run --name=frr --rm --network=host --privileged -v /etc/frr:/etc/frr:rw -v /var/run/frr:/var/run/frr:rw -v /var/tmp/frr:/var/tmp/frr:rw quay.io/frrouting/frr:10.3.0
         ExecStop=/usr/bin/docker stop frr
         Restart=on-failure
         RestartSec=5
@@ -255,8 +297,10 @@ systemd:
 
         # Forward rules in DOCKER-USER chain
         {{range $vrfkey, $vrf := .ExternalVRFs}}
-        ExecStart=/usr/bin/iptables -I DOCKER-USER -i {{$vrfkey}} -o enp2s0 -j ACCEPT{{range $nickey, $nic := $vrf.NICs}}
-        ExecStart=/usr/bin/iptables -I DOCKER-USER -i enp2s0 -o {{$nickey}} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+        ExecStart=/usr/bin/iptables -I DOCKER-USER -i {{$vrfkey}} -o enp2s0 -j ACCEPT
+        {{range $connNicKey, $connNic := $.ExternalNICs}}{{range $attach := $connNic.Attachments}}{{if eq $attach.VRF $vrfkey}}
+        ExecStart=/usr/bin/iptables -I DOCKER-USER -i enp2s0 -o {{$connNicKey}}.{{$attach.Vlan}} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT {{end}}{{end}}{{if and ($connNic.Untagged) (eq $connNic.UntaggedCfg.VRF $vrfkey)}}
+        ExecStart=/usr/bin/iptables -I DOCKER-USER -i enp2s0 -o {{$connNicKey}} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT {{end}}
         {{end}}{{end}}
 
         # Set network parameters for better forwarding (AI suggested)
