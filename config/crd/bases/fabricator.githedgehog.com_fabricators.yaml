@@ -318,6 +318,8 @@ spec:
                         type: object
                       platform:
                         properties:
+                          bashCompletion:
+                            type: string
                           certManager:
                             type: string
                           k3s:
@@ -509,6 +511,8 @@ spec:
                     type: object
                   platform:
                     properties:
+                      bashCompletion:
+                        type: string
                       certManager:
                         type: string
                       k3s:

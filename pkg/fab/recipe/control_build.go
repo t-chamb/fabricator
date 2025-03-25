@@ -19,6 +19,7 @@ import (
 	"go.githedgehog.com/fabricator/pkg/artificer"
 	"go.githedgehog.com/fabricator/pkg/embed/recipebin"
 	"go.githedgehog.com/fabricator/pkg/fab/comp"
+	"go.githedgehog.com/fabricator/pkg/fab/comp/bashcompletion"
 	"go.githedgehog.com/fabricator/pkg/fab/comp/certmanager"
 	"go.githedgehog.com/fabricator/pkg/fab/comp/f8r"
 	"go.githedgehog.com/fabricator/pkg/fab/comp/fabric"
@@ -206,6 +207,15 @@ func (b *ControlInstallBuilder) Build(ctx context.Context) error {
 		},
 	}); err != nil {
 		return fmt.Errorf("downloading cert-manager: %w", err)
+	}
+
+	slog.Info("Adding bash-completion to installer", "control", b.Control.Name)
+	if err := b.Downloader.FromORAS(ctx, installDir, bashcompletion.BashCompletionRef, bashcompletion.Version(b.Fab), []artificer.ORASFile{
+		{
+			Name: bashcompletion.TarballName,
+		},
+	}); err != nil {
+		return fmt.Errorf("downloading bash-completion: %w", err)
 	}
 
 	slog.Info("Adding config and wiring files to installer", "control", b.Control.Name)
