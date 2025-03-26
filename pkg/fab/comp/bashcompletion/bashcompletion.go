@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"go.githedgehog.com/fabric/pkg/util/logutil"
 	fabapi "go.githedgehog.com/fabricator/api/fabricator/v1beta1"
@@ -17,54 +18,104 @@ import (
 )
 
 const (
-	BashCompletionRef     = "bash-completion"
-	TarballName           = "bash-completion.tar.xz"
-	InstallDir            = "/opt/bash-completion"
-	BashCompletionVersion = "2.11"
-	TempExtractDir        = "/tmp/bash-completion-2.11"
-	CompletionsDir        = InstallDir + "/completions"
-	HookFilename          = "kubectl-fabric-hook.sh"
-	ProfileDir            = "/etc/profile.d"
-	ProfileFilename       = "bash-completion.sh"
+	BashCompletionRef = "bash-completion"
+	TarballName       = "bash-completion.tar.xz"
+	InstallDir        = "/opt/bash-completion"
+	CompletionsDir    = InstallDir + "/completions"
+	HookFilename      = "kubectl-fabric-hook.sh"
+	ProfileDir        = "/etc/profile.d"
+	ProfileFilename   = "bash-completion.sh"
 )
 
 func Version(f fabapi.Fabricator) meta.Version {
 	return f.Status.Versions.Platform.BashCompletion
 }
 
-func Install(ctx context.Context, workDir string) error {
+func Install(ctx context.Context, workDir string, fab fabapi.Fabricator) error {
 	slog.Info("Installing bash-completion")
+
+	versionStr := strings.TrimPrefix(string(Version(fab)), "v")
+
+	tempExtractDir := fmt.Sprintf("/tmp/bash-completion-%s", versionStr)
+
+	slog.Info("Using bash-completion version", "version", versionStr, "extractDir", tempExtractDir)
 
 	if err := os.MkdirAll(InstallDir, 0o755); err != nil {
 		return fmt.Errorf("creating bash-completion dir %q: %w", InstallDir, err)
 	}
 
 	tarballPath := filepath.Join(workDir, TarballName)
-	cmd := exec.CommandContext(ctx, "tar", "-xf", tarballPath, "-C", "/tmp")
+
+	if _, err := os.Stat(tarballPath); os.IsNotExist(err) {
+		return fmt.Errorf("tarball not found at %s", tarballPath) //nolint:goerr113
+	}
+
+	listCmd := exec.CommandContext(ctx, "tar", "-tvf", tarballPath)
+	listCmd.Dir = workDir
+	listCmd.Stdout = logutil.NewSink(ctx, slog.Debug, "tarball contents: ")
+	listCmd.Stderr = logutil.NewSink(ctx, slog.Debug, "tarball error: ")
+	if err := listCmd.Run(); err != nil {
+		return fmt.Errorf("listing tarball contents: %w", err)
+	}
+
+	slog.Info("Extracting bash-completion tarball", "path", tarballPath)
+	cmd := exec.CommandContext(ctx, "tar", "-xvf", tarballPath, "-C", "/tmp")
 	cmd.Dir = workDir
-	cmd.Stdout = logutil.NewSink(ctx, slog.Debug, "bash-completion: ")
-	cmd.Stderr = logutil.NewSink(ctx, slog.Debug, "bash-completion: ")
+	cmd.Stdout = logutil.NewSink(ctx, slog.Debug, "bash-completion extract: ")
+	cmd.Stderr = logutil.NewSink(ctx, slog.Debug, "bash-completion extract error: ")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("extracting bash-completion: %w", err)
+	}
+
+	if _, err := os.Stat(tempExtractDir); os.IsNotExist(err) {
+		lsCmd := exec.CommandContext(ctx, "ls", "-la", "/tmp")
+		lsCmd.Stdout = logutil.NewSink(ctx, slog.Info, "tmp contents: ")
+		if err := lsCmd.Run(); err != nil {
+			slog.Debug("Failed to list /tmp directory", "error", err)
+		}
+
+		return fmt.Errorf("extracted directory %s does not exist", tempExtractDir) //nolint:goerr113
+	}
+
+	lsCmd := exec.CommandContext(ctx, "ls", "-la", tempExtractDir)
+	lsCmd.Stdout = logutil.NewSink(ctx, slog.Info, "extracted contents: ")
+	if err := lsCmd.Run(); err != nil {
+		slog.Debug("Failed to list extracted directory", "error", err)
 	}
 
 	if err := os.MkdirAll(CompletionsDir, 0o755); err != nil {
 		return fmt.Errorf("creating completions dir: %w", err)
 	}
 
-	srcCompletions := filepath.Join(TempExtractDir, "completions")
-	cmd = exec.CommandContext(ctx, "cp", "-r", srcCompletions, InstallDir)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("copying bash-completion files: %w", err)
+	srcCompletions := filepath.Join(tempExtractDir, "completions")
+
+	if _, err := os.Stat(srcCompletions); os.IsNotExist(err) {
+		return fmt.Errorf("source completions directory %s does not exist", srcCompletions) //nolint:goerr113
 	}
 
-	srcBashCompletion := filepath.Join(TempExtractDir, "bash_completion")
-	cmd = exec.CommandContext(ctx, "cp", srcBashCompletion, InstallDir)
+	slog.Info("Copying bash completions", "from", srcCompletions, "to", InstallDir)
+	cmd = exec.CommandContext(ctx, "cp", "-rv", srcCompletions, InstallDir)
+	cmd.Stdout = logutil.NewSink(ctx, slog.Debug, "cp: ")
+	cmd.Stderr = logutil.NewSink(ctx, slog.Debug, "cp error: ")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("copying bash-completion files: %w", err) //nolint:goerr113
+	}
+
+	srcBashCompletion := filepath.Join(tempExtractDir, "bash_completion")
+
+	if _, err := os.Stat(srcBashCompletion); os.IsNotExist(err) {
+		return fmt.Errorf("source bash_completion file %s does not exist", srcBashCompletion) //nolint:goerr113
+	}
+
+	slog.Info("Copying bash_completion file", "from", srcBashCompletion, "to", InstallDir)
+	cmd = exec.CommandContext(ctx, "cp", "-v", srcBashCompletion, InstallDir)
+	cmd.Stdout = logutil.NewSink(ctx, slog.Debug, "cp: ")
+	cmd.Stderr = logutil.NewSink(ctx, slog.Debug, "cp error: ")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("copying bash_completion file: %w", err)
 	}
 
-	if err := os.RemoveAll(TempExtractDir); err != nil {
+	if err := os.RemoveAll(tempExtractDir); err != nil {
 		slog.Warn("Failed to clean up bash-completion tmp files", "error", err)
 	}
 

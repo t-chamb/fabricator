@@ -159,7 +159,7 @@ func (c *ControlInstall) Run(ctx context.Context) error {
 		return fmt.Errorf("installing zot: %w", err)
 	}
 
-	if err := bashcompletion.Install(ctx, c.WorkDir); err != nil {
+	if err := bashcompletion.Install(ctx, c.WorkDir, c.Fab); err != nil {
 		return fmt.Errorf("installing bash completion: %w", err)
 	}
 
